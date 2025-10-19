@@ -2,6 +2,8 @@
 
 Source Spec: `HydroChat.md` (authoritative). Based on Grok feedback analysis comparing phase.md implementation against original specification. Post-Phase 13 status: 80.13% coverage, 217 tests passing.
 
+**Note**: For code review improvements and refactoring changes, see [`code_review.md`](code_review.md).
+
 Legend:
 - D = Deliverables (artifacts produced)
 - EC = Exit Criteria (verifiable conditions to advance)
@@ -27,6 +29,39 @@ EC:
 - Test: Cost tracking increments properly for successful/failed LLM calls
 DEP: Phase 13 completion
 RISK: API rate limits – implement exponential backoff per §17; API costs – add usage tracking; Prompt injection – sanitize user input; LLM hallucination – validate responses against Intent enum strictly.
+
+### Phase 14 Implementation Status (2025-10-19)
+
+**✅ COMPLETED:**
+- ✅ `gemini_client.py` with official `google-genai` SDK (V2 implementation)
+- ✅ `classify_intent_fallback()` - LLM intent classification when regex returns UNKNOWN
+- ✅ `extract_fields_fallback()` - LLM field extraction (NRIC, names, contact, DOB)
+- ✅ Environment config: `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_MAX_INPUT_LENGTH` via `.env`
+- ✅ Prompt engineering: Structured prompts with all 7 Intent enum examples
+- ✅ Response parsing: JSON extraction with markdown support
+- ✅ Usage tracking: Token counting, cost calculation via `response.usage_metadata`
+- ✅ Prompt injection prevention: Input sanitization and validation
+- ✅ Model: `gemini-2.0-flash-exp` (official SDK)
+- ✅ All 28 LLM integration tests passing
+
+**Integration Status**:
+- ✅ Integrated in `conversation_graph.py` (imports GeminiClient)
+- ✅ Used by `intent_classifier.py` for fallback classification
+- ✅ Metrics tracking via `agent_stats.py`
+
+**Key Features**:
+- Exponential backoff on API errors (3 retries max)
+- Rate limit handling with proper error messages
+- Configurable input length limit (default: 1000 chars)
+- Thread-safe singleton pattern
+- Comprehensive error logging
+
+**References**:
+- Implementation: `backend/apps/hydrochat/gemini_client.py`
+- Tests: `backend/apps/hydrochat/tests/test_phase14_llm_integration.py` (28/28 passing)
+- Configuration: `backend/config/settings/base.py` lines 124-128
+
+---
 
 ## Phase 15 – Missing Core Nodes Implementation (HydroChat.md §24, §27)
 D:
@@ -68,23 +103,124 @@ RISK: Route explosion – keep map simple and data-driven; Maintenance burden �
 
 ## Phase 17 – Enhanced Metrics & Performance Monitoring (HydroChat.md §29, §22)
 D:
-- Extended `MetricsLogger`: LLM API call tracking, conversation flow timing, response latency monitoring
-- Performance benchmarks: Sub-2-second response time enforcement per §2 synchronous mode (excluding network)
+- **Gemini SDK Migration**: Migrate from manual `httpx` calls to official `google-genai` SDK (`google.genai.Client`) for accurate token counting and cost tracking
+  - Replace `gemini_client.py` httpx implementation with official SDK `client.models.generate_content()`
+  - Use `client.models.count_tokens()` for accurate token counting per official SDK docs
+  - Extract real token usage from API response metadata instead of estimates
+  - Update `GeminiUsageMetrics` to track actual tokens from `response.usage_metadata` field
+- Extended `MetricsLogger`: LLM API call tracking with **accurate token counts**, conversation flow timing, response latency monitoring
+- **Performance benchmarks**: Response time tracking decorator with <2s threshold enforcement per §2 synchronous mode (excluding network)
+  - Add `@track_response_time` decorator for conversation graph entry points
+  - Capture start/end timestamps for each conversation turn
+  - Log warnings when response time exceeds 2s threshold
 - Conversation analytics: Intent classification accuracy, user satisfaction indicators, error rate tracking
 - Alert thresholds: Error rate >20% warnings, excessive retry detection, performance degradation alerts
-- Dashboard data preparation: JSON export of metrics for external monitoring per §29
+- **Dashboard data preparation**: JSON export endpoint (`/api/hydrochat/metrics/export/`) for external monitoring per §29
+  - Developer-only endpoint using existing `generate_stats_summary()` 
+  - Returns comprehensive metrics in JSON format for dashboard consumption
 - Agent stats command: Developer-only access restrictions per §29 (not exposed to end-clinician)
 - Logging taxonomy enhancement: Performance timing logs, LLM interaction logs per §22
-- Metrics retention policy: Prevent metric storage explosion with configurable retention
+- **Metrics retention policy**: In-memory retention with TTL (max 1000 entries, 24h expiration, hourly cleanup)
+  - Configurable via `METRICS_MAX_ENTRIES` and `METRICS_TTL_HOURS` settings
+  - Manual cleanup task for expired entries
+  - Note: Persistent storage deferred to Phase 18 (Redis)
 EC:
-- Test: Performance benchmark fails if response time >2s (mocked network delays)
-- Test: LLM API metrics track successful/failed/retried calls with cost tracking
-- Test: Conversation analytics export includes accuracy percentages and error rates
-- Test: Agent stats command shows new metrics categories with proper access control
-- Test: Alert thresholds trigger warnings at configured levels (error rate >20%)
+- Test: Performance benchmark decorator tracks and warns on >2s response time (mocked network delays)
+- Test: Gemini SDK migration provides **accurate token counts** from API responses (not estimates)
+- Test: Token counting uses `client.models.count_tokens()` and validates against actual API usage
+- Test: LLM API metrics track successful/failed/retried calls with **real cost calculations** based on actual token usage
+- Test: Response time decorator captures timing for all conversation turns with proper logging
+- Test: Conversation analytics export includes accuracy percentages and error rates via JSON endpoint
+- Test: Agent stats command shows new metrics categories (token usage, response times) with proper access control
+- Test: Alert thresholds trigger warnings at configured levels (error rate >20%, retry count >5)
+- Test: Metrics retention policy correctly expires entries after 24h and enforces 1000-entry cap
+- Test: JSON export endpoint returns complete stats structure for dashboard integration
 - Integration: Stats command restricted to developer-only context per §29
-DEP: Phases 14-15 (LLM integration needed for API metrics, all nodes needed for flow timing)
-RISK: Metric storage explosion – implement retention policy; Performance overhead – batch metric updates; Alert fatigue – tune thresholds carefully.
+- Validation: Compare httpx baseline metrics vs SDK metrics to ensure parity after migration
+DEP: 
+- Phases 14-15 (LLM integration needed for API metrics, all nodes needed for flow timing)
+- Python package: `google-genai>=1.41.0` (already in requirements.txt, line 110)
+- Ensure `GEMINI_API_KEY` configured in environment per §16
+RISK: 
+- **SDK Migration**: Breaking changes from httpx → official SDK; Mitigation: Comprehensive test suite validates parity, maintain backward compatibility in metrics structure
+- **Token Tracking Accuracy**: SDK response structure may vary; Mitigation: Parse `response.usage_metadata.total_token_count` field with fallback to zero if missing
+- Metric storage explosion – implement retention policy with configurable TTL
+- Performance overhead – batch metric updates, use lightweight timing decorators
+- Alert fatigue – tune thresholds carefully based on production data
+- **Cost Tracking Precision**: Token-to-cost conversion uses fixed rates; Mitigation: Document rate assumptions, make configurable per model
+
+### Phase 17 Implementation Status (2025-10-19)
+
+**✅ COMPLETED:**
+1. **Gemini SDK Migration (V1 → V2)**:
+   - ✅ Migrated from manual `httpx` to official `google-genai` SDK
+   - ✅ Deleted old `gemini_client.py` (V1 httpx implementation)
+   - ✅ Renamed `gemini_client_v2.py` → `gemini_client.py`
+   - ✅ Updated all imports across 5 files (conversation_graph, intent_classifier, agent_stats, views, tests)
+   - ✅ All 28 LLM integration tests updated and passing
+   - ✅ Accurate token tracking from `response.usage_metadata` (prompt + completion tokens)
+   - ✅ Cost calculation using real token counts (not estimates)
+   - ✅ Model: `gemini-2.0-flash-exp` (SDK default)
+
+2. **Metrics Retention Policy**:
+   - ✅ Implemented in-memory retention with configurable TTL
+   - ✅ `MetricsStore` class with max_entries and ttl_hours parameters
+   - ✅ Automatic cleanup of expired entries
+   - ✅ Configurable via `METRICS_MAX_ENTRIES` and `METRICS_TTL_HOURS`
+   - ✅ All 27 metrics retention tests passing
+
+3. **Configuration Management**:
+   - ✅ Added `GEMINI_MAX_INPUT_LENGTH` configuration (default: 1000 chars)
+   - ✅ Configurable via `.env` file and Django settings
+   - ✅ Better error messages with actual values (performance.py, metrics_store.py)
+
+4. **Metrics Export Endpoint**:
+   - ✅ `/api/hydrochat/metrics/export/` JSON endpoint implemented
+   - ✅ Developer-only access (staff/superuser)
+   - ✅ Returns LLM metrics, performance stats, retention policy info
+   - ✅ Fixed conversation store access to use proper API
+
+**🔄 IN PROGRESS / TODO:**
+1. **Performance Benchmarks**:
+   - ⏳ `@track_response_time` decorator (not yet implemented)
+   - ⏳ <2s threshold enforcement and warnings
+   - ⏳ Response latency monitoring
+
+2. **Conversation Analytics**:
+   - ⏳ Intent classification accuracy tracking
+   - ⏳ Error rate monitoring with >20% threshold alerts
+   - ⏳ User satisfaction indicators
+
+3. **Extended MetricsLogger**:
+   - ⏳ Conversation flow timing (beyond current metrics)
+   - ⏳ Per-turn performance tracking
+
+**Key Files Modified**:
+- `backend/apps/hydrochat/gemini_client.py` (V2 SDK implementation)
+- `backend/apps/hydrochat/performance.py` (metrics with retention)
+- `backend/apps/hydrochat/metrics_store.py` (storage with TTL)
+- `backend/apps/hydrochat/views.py` (metrics export endpoint)
+- `backend/config/settings/base.py` (Gemini configuration)
+- `.env` and `.env.example` (configuration parameters)
+
+**Tests Status**:
+- ✅ 28/28 LLM integration tests passing (`test_phase14_llm_integration.py`)
+- ✅ 27/27 metrics retention tests passing (`test_phase17_metrics_retention.py`)
+- ✅ 2/2 metrics export tests passing (`test_phase17_sdk_migration.py`)
+
+**Next Steps for Phase 17 Completion**:
+1. Implement `@track_response_time` decorator
+2. Add conversation analytics tracking
+3. Implement alert threshold logic (error rate >20%)
+4. Complete performance benchmark tests
+5. Document metrics dashboard integration guide
+
+**References**:
+- SDK Migration Details: [`code_review.md`](code_review.md#gemini-client-sdk-migration-v1--v2-2025-10-19)
+- Test Files: `backend/apps/hydrochat/tests/test_phase17_*.py`
+- Configuration: `backend/config/settings/base.py` lines 124-128
+
+---
 
 ## Phase 18 – Advanced State Management (Redis Option) (HydroChat.md §2 Future)
 
@@ -533,12 +669,17 @@ RISK: Accessibility complexity – focus on critical path first; Error boundary 
    - Validate all response templates match §25 specifications exactly
 
 3. **Performance & Load Tests** (Phases 16-17):
-   - Response time benchmarking with timing assertions (<2s per §2)
+   - **Response time benchmarking** with timing assertions (<2s per §2) using decorators
+   - **Token counting accuracy** validation using official SDK `client.models.count_tokens()`
+   - **Cost calculation tests** comparing estimated vs actual token usage from API responses
+   - **Metrics retention policy** tests (1000-entry cap, 24h TTL, hourly cleanup)
+   - **JSON export endpoint** validation for dashboard data structure
    - Concurrent conversation isolation (expand from current 10 to 50 threads)
    - Memory usage monitoring during extended conversations with leak detection
    - Metrics collection accuracy under load with proper retention policies
    - Graph routing performance with all 16 nodes under concurrent load
    - LLM API performance impact measurement and optimization
+   - **SDK migration validation** comparing httpx baseline vs official SDK metrics
 
 4. **State Management Tests** (Phase 18):
    - Redis state store round-trip serialization with complex objects (deque, enums, datetime)
@@ -574,8 +715,10 @@ RISK: Accessibility complexity – focus on critical path first; Error boundary 
 .\.venv-win\Scripts\Activate.ps1; cd backend; pytest apps/hydrochat/tests/test_phase15_missing_nodes.py -v
 .\.venv-win\Scripts\Activate.ps1; cd backend; pytest apps/hydrochat/tests/test_phase16_routing_validation.py -v
 
-# Performance benchmarking
+# Performance benchmarking (Phase 17)
 .\.venv-win\Scripts\Activate.ps1; cd backend; pytest apps/hydrochat/tests/test_phase17_performance.py -v --benchmark
+.\.venv-win\Scripts\Activate.ps1; cd backend; pytest apps/hydrochat/tests/test_phase17_sdk_migration.py -v
+.\.venv-win\Scripts\Activate.ps1; cd backend; pytest apps/hydrochat/tests/test_phase17_metrics_retention.py -v
 
 # Concurrency testing (50 threads)
 .\.venv-win\Scripts\Activate.ps1; cd backend; pytest apps/hydrochat/tests/test_concurrency_enhanced.py -v
@@ -669,27 +812,52 @@ cd frontend/test; .\run-phase14-20-tests.ps1
 ## Progress Tracking (Phases 14-20)
 | Phase | Status | Notes |
 |-------|--------|-------|
-| 14 | TODO | Gemini API integration - LLM fallback classification |
+| 14 | **PARTIAL** ✅ | Gemini client implemented with SDK - LLM fallback classification functional, 28/28 tests passing |
 | 15 | TODO | Missing nodes: ingest_user_message, summarize_history, finalize_response |
 | 16 | TODO | Centralized routing map, graph validation, documentation |
-| 17 | TODO | Enhanced metrics, performance monitoring, analytics |
+| 17 | **PARTIAL** ✅ | **SDK Migration ✅**, Metrics Retention ✅, Export Endpoint ✅ — Still need: performance decorators, analytics tracking, alert thresholds |
 | 18 | TODO | Redis state management option with fallback |
-| 19 | TODO | Advanced scan features, STL security, audit logging |
+| 19 | **NEXT** 🎯 | Advanced scan features, STL security, audit logging |
 | 20 | TODO | Frontend error boundaries, accessibility compliance |
+
+**Legend**: ✅ Complete | 🎯 Next Priority | ⏳ In Progress
 
 ---
 ## Implementation Priority & Sequencing
-**Critical Path (Must Implement)**:
-1. Phase 14: LLM integration addresses core specification gap
-2. Phase 15: Missing nodes complete the graph architecture
-3. Phase 16: Routing map provides maintainable structure
+
+**Current Status (as of 2025-10-19)**:
+- ✅ Phase 14: **PARTIAL** - Gemini SDK integration complete, LLM fallback functional
+- ✅ Phase 17: **PARTIAL** - SDK migration, metrics retention, export endpoint complete
+- 🎯 **Next Target**: Phase 19 - Advanced scan features, STL security
+
+**Remaining Critical Path**:
+1. **Phase 15** (High Priority): Missing nodes complete the graph architecture
+   - Required for: Full conversation flow, history summarization, response formatting
+   - Blocks: Phase 16 routing validation
+   
+2. **Phase 16** (High Priority): Routing map provides maintainable structure
+   - Required for: Graph validation, state transition safety
+   - Blocks: Production deployment confidence
 
 **Enhanced Features (Should Implement)**:
-4. Phase 17: Performance monitoring for production readiness
-5. Phase 20: Frontend polish for user experience
+3. **Phase 19** 🎯 (NEXT): Advanced scan features for production readiness
+   - STL security with temporary URLs
+   - Download audit logging
+   - Enhanced filtering and pagination
+   - Can be implemented in parallel with Phase 15/16
+   
+4. **Phase 17** (Complete Remaining): Finish performance monitoring
+   - Response time decorators
+   - Alert thresholds
+   - Analytics tracking
+   
+5. **Phase 20**: Frontend polish for user experience
+   - Error boundaries
+   - Accessibility compliance
 
 **Optional Enhancements (May Implement)**:
-6. Phase 18: Redis scaling for production deployment
-7. Phase 19: Advanced features for power users
+6. **Phase 18**: Redis scaling for distributed deployment
+   - Optional feature for production scaling
+   - Can be deferred until needed
 
 This roadmap addresses the critical gaps identified in Grok's analysis while maintaining the granular, anti-hallucination structure of the original phase.md format.
